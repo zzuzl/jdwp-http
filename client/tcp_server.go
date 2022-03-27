@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+type localClient struct {
+	conn       *net.TCPConn
+	clientConn *connection.HTTPConn
+	packets    chan *protocol.WrappedPacket
+}
+
 type TCPServer struct {
 	client *HTTPClient
 	port   int
@@ -58,14 +64,18 @@ func (server *TCPServer) accept(listener *net.TCPListener) error {
 }
 
 func (server *TCPServer) handle(conn *net.TCPConn) {
-	var clientConn *connection.HTTPConn
 	var err error
-	defer closeOnFail(conn, clientConn)
+
+	lc := &localClient{
+		conn:    conn,
+		packets: make(chan *protocol.WrappedPacket, 100),
+	}
+	defer closeOnFail(lc, err)
 
 	clientID := genClientID()
 	log.Infof("got tcp connection from %s, use clientID: %s", conn.RemoteAddr(), clientID)
 
-	clientConn, err = server.client.Connect(clientID)
+	lc.clientConn, err = server.client.Connect(clientID)
 	if err != nil {
 		log.Errorf("can't connect to server %s", err)
 		return
@@ -73,11 +83,14 @@ func (server *TCPServer) handle(conn *net.TCPConn) {
 
 	connection.SetTCPConnOptions(conn)
 
-	go send(conn, clientConn)
-	go loopFetch(conn, clientConn)
+	go send(lc)
+	go loopFetch(lc)
+	go loopSend(lc)
 }
 
-func send(conn *net.TCPConn, clientConn *connection.HTTPConn) {
+func send(lc *localClient) {
+	conn := lc.conn
+	clientConn := lc.clientConn
 	defer closeConn(conn, clientConn)
 
 	var err error
@@ -114,33 +127,16 @@ func send(conn *net.TCPConn, clientConn *connection.HTTPConn) {
 			return
 		}
 		log.Infof("read packet from local client: %v", packet)
-
-		var resp []byte
-		if resp, err = clientConn.SendData(packet.Serialize()); err != nil {
-			log.Errorf("send data fialed: %s", err)
-			return
-		}
-
-		var packets []*protocol.WrappedPacket
-		if packets, err = clientConn.ParsePacketsFromResp(resp); err != nil {
-			log.Errorf("parse packets fialed: %s", err)
-			return
-		}
-
-		for _, p := range packets {
-			conn.SetWriteDeadline(time.Now().Add(connection.WriteDeadlineDuration))
-			if err = protocol.WritePacket(conn, p); err != nil {
-				log.Errorf("write packet fialed: %s", err)
-				return
-			}
-		}
+		lc.packets <- packet
 	}
 }
 
-func loopFetch(conn *net.TCPConn, clientConn *connection.HTTPConn) {
+func loopFetch(lc *localClient) {
+	conn := lc.conn
+	clientConn := lc.clientConn
 	defer closeConn(conn, clientConn)
 
-	interval := time.Millisecond * 100
+	interval := time.Millisecond * 300
 	ticker := time.NewTicker(interval)
 	var err error
 	defer ticker.Stop()
@@ -159,7 +155,7 @@ func loopFetch(conn *net.TCPConn, clientConn *connection.HTTPConn) {
 		}
 
 		var packets []*protocol.WrappedPacket
-		if packets, err = clientConn.ParsePacketsFromResp(resp); err != nil {
+		if packets, err = connection.ReadPackets(resp); err != nil {
 			log.Errorf("parse packets fialed: %s", err)
 			return
 		}
@@ -172,6 +168,79 @@ func loopFetch(conn *net.TCPConn, clientConn *connection.HTTPConn) {
 			}
 		}
 	}
+}
+
+func loopSend(lc *localClient) {
+	conn := lc.conn
+	clientConn := lc.clientConn
+	defer closeConn(conn, clientConn)
+
+	interval := time.Millisecond * 300
+	ticker := time.NewTicker(interval)
+	var err error
+	defer ticker.Stop()
+
+	log.Infof("start loop send, interval:%s", interval)
+	for range ticker.C {
+		if clientConn == nil || conn == nil {
+			log.Warnf("conn is:%v, clientConn is:%v", conn, clientConn)
+			return
+		}
+
+		packetsOfClient := findSomePacketsOfClient(lc)
+		if len(packetsOfClient) == 0 {
+			continue
+		}
+
+		var packetStr string
+		if packetStr, err = connection.ConvertToBase64String(packetsOfClient); err != nil {
+			log.Errorf("convert base64 fialed: %s", err)
+			return
+		}
+		log.Infof("send packetStr:%s", packetStr)
+
+		var resp []byte
+		if resp, err = clientConn.SendData([]byte(packetStr)); err != nil {
+			log.Errorf("send data fialed: %s", err)
+			return
+		}
+
+		var packets []*protocol.WrappedPacket
+		if packets, err = connection.ReadPackets(resp); err != nil {
+			log.Errorf("parse packets fialed: %s", err)
+			return
+		}
+
+		for _, p := range packets {
+			conn.SetWriteDeadline(time.Now().Add(connection.WriteDeadlineDuration))
+			if err = protocol.WritePacket(conn, p); err != nil {
+				log.Errorf("write packet fialed: %s", err)
+				return
+			}
+		}
+	}
+}
+
+func findSomePacketsOfClient(lc *localClient) []*protocol.WrappedPacket {
+	packets := make([]*protocol.WrappedPacket, 0)
+
+	length := len(lc.packets)
+	if length == 0 {
+		return packets
+	}
+
+	for len(packets) < length {
+		p, ok := <-lc.packets
+		if !ok || p == nil {
+			break
+		}
+		if len(packets) >= 10 {
+			break
+		}
+		packets = append(packets, p)
+	}
+	log.Infof("find %d packets of client", len(packets))
+	return packets
 }
 
 func genClientID() string {
@@ -195,14 +264,19 @@ func closeConn(conn *net.TCPConn, clientConn *connection.HTTPConn) {
 	}
 }
 
-func closeOnFail(conn *net.TCPConn, clientConn *connection.HTTPConn) {
-	if err := recover(); err != nil {
-		log.Errorf("got err in handle:%s", err)
-		if conn != nil {
-			conn.Close()
+func closeOnFail(lc *localClient, err error) {
+	if e := recover(); e != nil {
+		log.Errorf("got err in handle:%s", e)
+		if err == nil {
+			err = fmt.Errorf("%v", e)
 		}
-		if clientConn != nil {
-			clientConn.Close()
+	}
+	if err != nil {
+		if lc.conn != nil {
+			lc.conn.Close()
+		}
+		if lc.clientConn != nil {
+			lc.clientConn.Close()
 		}
 	}
 }

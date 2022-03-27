@@ -2,8 +2,12 @@ package connection
 
 import (
 	"bytes"
+	"encoding/base64"
+	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 	"io/ioutil"
+	"jdwp-http/proto/pb_gen"
 	"jdwp-http/protocol"
 	"net"
 	"net/http"
@@ -103,17 +107,54 @@ func (c *HTTPConn) FetchPackets() ([]byte, error) {
 	return body, nil
 }
 
-func (c *HTTPConn) ParsePacketsFromResp(data []byte) ([]*protocol.WrappedPacket, error) {
+func ReadPackets(data []byte) ([]*protocol.WrappedPacket, error) {
+	var err error
 	packets := make([]*protocol.WrappedPacket, 0)
-	if len(data) > 0 {
-		p := &protocol.WrappedPacket{}
-		err := p.DeserializeFrom(data)
-		if err != nil {
-			return nil, errors.Wrap(err, "deserialize from resp")
-		}
-		packets = append(packets, p)
+
+	if len(data) == 0 {
+		return packets, nil
 	}
+
+	var decodeData []byte
+	if decodeData, err = base64.StdEncoding.DecodeString(string(data)); err != nil {
+		return nil, errors.Wrap(err, "decode base64")
+	}
+
+	ps := &pb_gen.Packets{}
+	if err = proto.Unmarshal(decodeData, ps); err != nil {
+		return nil, errors.Wrap(err, "unmarshal")
+	}
+
+	for _, p := range ps.Packets {
+		packet := &protocol.WrappedPacket{}
+		if err = packet.FromPb(p); err != nil {
+			return nil, errors.Wrap(err, "parse")
+		}
+		packets = append(packets, packet)
+	}
+	log.Infof("read packets size:%d", len(packets))
 	return packets, nil
+}
+
+func ConvertToBase64String(packets []*protocol.WrappedPacket) (string, error) {
+	if len(packets) == 0 {
+		return "", nil
+	}
+
+	var err error
+	ps := &pb_gen.Packets{
+		Packets: make([]*pb_gen.Packet, 0, len(packets)),
+	}
+	for _, p := range packets {
+		ps.Packets = append(ps.Packets, p.ToPb())
+	}
+
+	log.Infof("convert packets size:%d", len(packets))
+	var data []byte
+	if data, err = proto.Marshal(ps); err != nil {
+		return "", errors.Wrap(err, "marshal packets")
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 func (c *HTTPConn) Close() error {

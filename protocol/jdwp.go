@@ -49,6 +49,26 @@ func (w *WrappedPacket) Serialize() []byte {
 	return []byte(base64.StdEncoding.EncodeToString(data))
 }
 
+func (w *WrappedPacket) ToPb() *pb_gen.Packet {
+	packet := pb_gen.Packet{}
+	packet.Id = w.id
+	packet.Flags = int32(w.flags)
+	if w.commandPacket != nil {
+		packet.CommandPacket = &pb_gen.CommandPacket{
+			Commandset: int32(w.commandPacket.Commandset),
+			Command:    int32(w.commandPacket.Command),
+			Data:       w.commandPacket.Data,
+		}
+	}
+	if w.replyPacket != nil {
+		packet.ReplyPacket = &pb_gen.ReplyPacket{
+			Errorcode: uint32(w.replyPacket.Errorcode),
+			Data:      w.replyPacket.Data,
+		}
+	}
+	return &packet
+}
+
 func (w *WrappedPacket) DeserializeFrom(data []byte) error {
 	decodeData, err := base64.StdEncoding.DecodeString(string(data))
 	if err != nil {
@@ -59,6 +79,25 @@ func (w *WrappedPacket) DeserializeFrom(data []byte) error {
 	if err = proto.Unmarshal(decodeData, &packet); err != nil {
 		return errors.Wrap(err, "Unmarshal proto")
 	}
+	w.id = packet.Id
+	w.flags = byte(packet.Flags)
+	if packet.CommandPacket != nil {
+		w.commandPacket = &CommandPacket{
+			Commandset: byte(packet.CommandPacket.Commandset),
+			Command:    byte(packet.CommandPacket.Command),
+			Data:       packet.CommandPacket.Data,
+		}
+	}
+	if packet.ReplyPacket != nil {
+		w.replyPacket = &ReplyPacket{
+			Errorcode: uint16(packet.ReplyPacket.Errorcode),
+			Data:      packet.ReplyPacket.Data,
+		}
+	}
+	return nil
+}
+
+func (w *WrappedPacket) FromPb(packet *pb_gen.Packet) error {
 	w.id = packet.Id
 	w.flags = byte(packet.Flags)
 	if packet.CommandPacket != nil {
@@ -129,7 +168,7 @@ func ReadPacket(conn io.Reader) (*WrappedPacket, error) {
 	var size uint32
 	err := binary.Read(conn, binary.BigEndian, &size)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "read size from conn")
 	}
 	if size < headerBytes {
 		return nil, fmt.Errorf("packet too small: %d", size)

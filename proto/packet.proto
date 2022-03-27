@@ -1,6 +1,10 @@
 syntax = "proto3";
 option go_package = "proto/pb_gen";
 
+message Packets {
+    repeated Packet packets = 1;
+}
+
 message Packet {
     uint32 id = 1;
     int32 flags = 2;

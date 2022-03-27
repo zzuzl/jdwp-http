@@ -57,7 +57,7 @@ func (s *HTTPServer) onNewClient(w http.ResponseWriter, request *http.Request) {
 	var clientConn *net.TCPConn
 	var err error
 
-	defer closeOnFail(clientConn)
+	defer closeOnFail(clientConn, err)
 
 	clientID := request.Header.Get("client")
 	clientConn, err = s.client.Connect(s.jdwpPort)
@@ -93,7 +93,7 @@ func (s *HTTPServer) onMessage(w http.ResponseWriter, request *http.Request) {
 	var clientConn *net.TCPConn
 	var err error
 
-	defer closeOnFail(clientConn)
+	defer closeOnFail(clientConn, err)
 
 	clientID := request.Header.Get("client")
 	c := s.getRemoteClient(clientID)
@@ -115,29 +115,64 @@ func (s *HTTPServer) onMessage(w http.ResponseWriter, request *http.Request) {
 			writeResp(w, http.StatusInternalServerError, "read body err")
 			return
 		}
-		packet := &protocol.WrappedPacket{}
-		if err = packet.DeserializeFrom(body); err != nil {
+
+		log.Infof("receive ReqTypePacket, body:%s", body)
+
+		var packets []*protocol.WrappedPacket
+		if packets, err = connection.ReadPackets(body); err != nil {
 			log.Errorf("deserialize packet :%s, err:%v", clientID, err)
 			writeResp(w, http.StatusInternalServerError, "deserialize packet err")
 			return
 		}
-		clientConn.SetWriteDeadline(time.Now().Add(connection.WriteDeadlineDuration))
-		if err = protocol.WritePacket(clientConn, packet); err != nil {
-			log.Errorf("write packet :%s, err:%v", clientID, err)
-			writeResp(w, http.StatusInternalServerError, "write packet err")
+		for _, p := range packets {
+			clientConn.SetWriteDeadline(time.Now().Add(connection.WriteDeadlineDuration))
+			if err = protocol.WritePacket(clientConn, p); err != nil {
+				log.Errorf("write packet :%s, err:%v", clientID, err)
+				writeResp(w, http.StatusInternalServerError, "write packet err")
+				return
+			}
+		}
+
+		var respStr string
+		if respStr, err = connection.ConvertToBase64String(findSomePacketsOfClient(c)); err != nil {
+			log.Errorf("convert packets to base64 string :%s, err:%v", clientID, err)
+			writeResp(w, http.StatusInternalServerError, "convert packets to base64 string err")
 			return
 		}
+		writeResp(w, http.StatusOK, respStr)
 	} else if reqType == connection.ReqTypeFetch {
-		dataToWrite := make([]byte, 0)
-
-		packet, ok := <-c.packets
-		if ok && packet != nil {
-			dataToWrite = packet.Serialize()
+		var respStr string
+		if respStr, err = connection.ConvertToBase64String(findSomePacketsOfClient(c)); err != nil {
+			log.Errorf("convert packets to base64 string :%s, err:%v", clientID, err)
+			writeResp(w, http.StatusInternalServerError, "convert packets to base64 string err")
+			return
 		}
-		writeResp(w, http.StatusOK, string(dataToWrite))
+		writeResp(w, http.StatusOK, respStr)
 	} else {
 		writeResp(w, http.StatusBadRequest, "invalid reqType")
 	}
+}
+
+func findSomePacketsOfClient(c *remoteClient) []*protocol.WrappedPacket {
+	packets := make([]*protocol.WrappedPacket, 0)
+
+	length := len(c.packets)
+	if length == 0 {
+		return packets
+	}
+
+	for len(packets) < length {
+		p, ok := <-c.packets
+		if !ok || p == nil {
+			break
+		}
+		if len(packets) >= 10 {
+			break
+		}
+		packets = append(packets, p)
+	}
+	log.Infof("find %d packets of client", len(packets))
+	return packets
 }
 
 func (s *HTTPServer) addRemoteClient(clientID string, clientConn *net.TCPConn) *remoteClient {
@@ -221,9 +256,14 @@ func closeConn(clientConn *net.TCPConn) {
 	}
 }
 
-func closeOnFail(clientConn *net.TCPConn) {
-	if err := recover(); err != nil {
-		log.Errorf("got err in handle:%s", err)
+func closeOnFail(clientConn *net.TCPConn, err error) {
+	if e := recover(); e != nil {
+		log.Errorf("got err in handle:%s", e)
+		if err == nil {
+			err = fmt.Errorf("%v", e)
+		}
+	}
+	if err != nil {
 		if clientConn != nil {
 			clientConn.Close()
 		}
