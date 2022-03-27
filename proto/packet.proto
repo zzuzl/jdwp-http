@@ -1,0 +1,20 @@
+syntax = "proto3";
+option go_package = "proto/pb_gen";
+
+message Packet {
+    uint32 id = 1;
+    int32 flags = 2;
+    CommandPacket commandPacket = 3;
+    ReplyPacket replyPacket = 4;
+}
+
+message CommandPacket {
+    int32 Commandset = 1;
+	int32 Command = 2;
+	bytes Data = 3;
+}
+
+message ReplyPacket {
+    uint32 Errorcode = 1;
+	bytes Data = 2;
+}
