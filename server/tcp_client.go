@@ -11,14 +11,14 @@ type TCPClient struct {
 	server string
 }
 
-func NewTCPClient(server string) *TCPClient {
+func NewTCPClient(jdwpAddress string) *TCPClient {
 	return &TCPClient{
-		server: server,
+		server: jdwpAddress,
 	}
 }
 
-func (client *TCPClient) Connect(port int) (*net.TCPConn, error) {
-	addr := fmt.Sprintf("%s:%d", client.server, port)
+func (client *TCPClient) Connect() (*net.TCPConn, error) {
+	addr := client.server
 	log.Infof("connecting tcp server: %s", addr)
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
@@ -28,7 +28,7 @@ func (client *TCPClient) Connect(port int) (*net.TCPConn, error) {
 
 	conn, err := net.DialTCP("tcp", nil, tcpAddr)
 	if err != nil {
-		return nil, errors.Wrap(err, fmt.Sprintf("can't connect %s:%d", client.server, port))
+		return nil, errors.Wrap(err, fmt.Sprintf("can't connect %s", client.server))
 	}
 	log.Infof("tcp server connected: %s", addr)
 	return conn, nil

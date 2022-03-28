@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
 	"io/ioutil"
 	"jdwp-http/proto/pb_gen"
 	"jdwp-http/protocol"
@@ -18,9 +17,6 @@ const (
 	HandSharkDeadlineDuration = time.Millisecond * 500
 	WriteDeadlineDuration     = time.Millisecond * 500
 	DeadlineDuration          = time.Second * 60 * 30
-
-	ReqTypePacket = "packet"
-	ReqTypeFetch  = "fetch"
 )
 
 var (
@@ -57,7 +53,7 @@ func (c *HTTPConn) SendHandShark() error {
 	return nil
 }
 
-func (c *HTTPConn) SendData(data []byte) ([]byte, error) {
+func (c *HTTPConn) SendAndFetchPackets(data []byte) ([]byte, error) {
 	request, err := http.NewRequest(http.MethodPost, c.address, bytes.NewBuffer(data))
 	if err != nil {
 		return nil, errors.Wrap(err, "new request")
@@ -65,32 +61,6 @@ func (c *HTTPConn) SendData(data []byte) ([]byte, error) {
 	if request.Header == nil {
 		request.Header = http.Header{}
 	}
-	request.Header.Set("type", ReqTypePacket)
-	request.Header.Set("client", c.clientID)
-
-	resp, err := hClient.Do(request)
-	if err != nil {
-		return nil, errors.Wrap(err, "send request")
-	}
-	defer resp.Body.Close()
-
-	var body []byte
-	body, err = ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, "read from http resp")
-	}
-	return body, nil
-}
-
-func (c *HTTPConn) FetchPackets() ([]byte, error) {
-	request, err := http.NewRequest(http.MethodGet, c.address, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "new request")
-	}
-	if request.Header == nil {
-		request.Header = http.Header{}
-	}
-	request.Header.Set("type", ReqTypeFetch)
 	request.Header.Set("client", c.clientID)
 
 	resp, err := hClient.Do(request)
@@ -132,7 +102,6 @@ func ReadPackets(data []byte) ([]*protocol.WrappedPacket, error) {
 		}
 		packets = append(packets, packet)
 	}
-	log.Infof("read packets size:%d", len(packets))
 	return packets, nil
 }
 
@@ -149,7 +118,6 @@ func ConvertToBase64String(packets []*protocol.WrappedPacket) (string, error) {
 		ps.Packets = append(ps.Packets, p.ToPb())
 	}
 
-	log.Infof("convert packets size:%d", len(packets))
 	var data []byte
 	if data, err = proto.Marshal(ps); err != nil {
 		return "", errors.Wrap(err, "marshal packets")

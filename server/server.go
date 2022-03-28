@@ -23,17 +23,15 @@ type remoteClient struct {
 type HTTPServer struct {
 	port     int
 	client   *TCPClient
-	jdwpPort int
 	clients  map[string]*remoteClient
 	clientMu sync.RWMutex
 }
 
-func NewHTTPServer(port, jdwpPort int, client *TCPClient) *HTTPServer {
+func NewHTTPServer(port int, client *TCPClient) *HTTPServer {
 	return &HTTPServer{
-		port:     port,
-		client:   client,
-		jdwpPort: jdwpPort,
-		clients:  make(map[string]*remoteClient),
+		port:    port,
+		client:  client,
+		clients: make(map[string]*remoteClient),
 	}
 }
 
@@ -60,7 +58,7 @@ func (s *HTTPServer) onNewClient(w http.ResponseWriter, request *http.Request) {
 	defer closeOnFail(clientConn, err)
 
 	clientID := request.Header.Get("client")
-	clientConn, err = s.client.Connect(s.jdwpPort)
+	clientConn, err = s.client.Connect()
 	if err != nil {
 		log.Errorf("can't connect to jvm:%v", err)
 		return
@@ -104,53 +102,46 @@ func (s *HTTPServer) onMessage(w http.ResponseWriter, request *http.Request) {
 	}
 	clientConn = c.clientConn
 	connection.SetTCPConnOptions(clientConn)
+	defer request.Body.Close()
 
-	reqType := request.Header.Get("type")
-	if reqType == connection.ReqTypePacket {
-		defer request.Body.Close()
-
-		var body []byte
-		if body, err = ioutil.ReadAll(request.Body); err != nil {
-			log.Errorf("read body :%s, err:%v", clientID, err)
-			writeResp(w, http.StatusInternalServerError, "read body err")
-			return
-		}
-
-		log.Infof("receive ReqTypePacket, body:%s", body)
-
-		var packets []*protocol.WrappedPacket
-		if packets, err = connection.ReadPackets(body); err != nil {
-			log.Errorf("deserialize packet :%s, err:%v", clientID, err)
-			writeResp(w, http.StatusInternalServerError, "deserialize packet err")
-			return
-		}
-		for _, p := range packets {
-			clientConn.SetWriteDeadline(time.Now().Add(connection.WriteDeadlineDuration))
-			if err = protocol.WritePacket(clientConn, p); err != nil {
-				log.Errorf("write packet :%s, err:%v", clientID, err)
-				writeResp(w, http.StatusInternalServerError, "write packet err")
-				return
-			}
-		}
-
-		var respStr string
-		if respStr, err = connection.ConvertToBase64String(findSomePacketsOfClient(c)); err != nil {
-			log.Errorf("convert packets to base64 string :%s, err:%v", clientID, err)
-			writeResp(w, http.StatusInternalServerError, "convert packets to base64 string err")
-			return
-		}
-		writeResp(w, http.StatusOK, respStr)
-	} else if reqType == connection.ReqTypeFetch {
-		var respStr string
-		if respStr, err = connection.ConvertToBase64String(findSomePacketsOfClient(c)); err != nil {
-			log.Errorf("convert packets to base64 string :%s, err:%v", clientID, err)
-			writeResp(w, http.StatusInternalServerError, "convert packets to base64 string err")
-			return
-		}
-		writeResp(w, http.StatusOK, respStr)
-	} else {
-		writeResp(w, http.StatusBadRequest, "invalid reqType")
+	var body []byte
+	if body, err = ioutil.ReadAll(request.Body); err != nil {
+		log.Errorf("read body :%s, err:%v", clientID, err)
+		writeResp(w, http.StatusInternalServerError, "read body err")
+		return
 	}
+
+	var packets []*protocol.WrappedPacket
+	if packets, err = connection.ReadPackets(body); err != nil {
+		log.Errorf("deserialize packet :%s, err:%v", clientID, err)
+		writeResp(w, http.StatusInternalServerError, "deserialize packet err")
+		return
+	}
+
+	if len(packets) > 0 {
+		log.Infof("receive packets: %d", len(packets))
+	}
+
+	for _, p := range packets {
+		clientConn.SetWriteDeadline(time.Now().Add(connection.WriteDeadlineDuration))
+		if err = protocol.WritePacket(clientConn, p); err != nil {
+			log.Errorf("write packet :%s, err:%v", clientID, err)
+			writeResp(w, http.StatusInternalServerError, "write packet err")
+			return
+		}
+		log.Infof("write packet to jdwp server:%s", p)
+	}
+
+	var respStr string
+	returnPackets := findSomePacketsOfClient(c)
+	if len(returnPackets) > 0 {
+		if respStr, err = connection.ConvertToBase64String(returnPackets); err != nil {
+			log.Errorf("convert packets to base64 string :%s, err:%v", clientID, err)
+			writeResp(w, http.StatusInternalServerError, "convert packets to base64 string err")
+			return
+		}
+	}
+	writeResp(w, http.StatusOK, respStr)
 }
 
 func findSomePacketsOfClient(c *remoteClient) []*protocol.WrappedPacket {

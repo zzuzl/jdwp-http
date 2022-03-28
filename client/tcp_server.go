@@ -83,12 +83,11 @@ func (server *TCPServer) handle(conn *net.TCPConn) {
 
 	connection.SetTCPConnOptions(conn)
 
-	go send(lc)
-	go loopFetch(lc)
-	go loopSend(lc)
+	go readLocal(lc)
+	go loopSendAndFetch(lc)
 }
 
-func send(lc *localClient) {
+func readLocal(lc *localClient) {
 	conn := lc.conn
 	clientConn := lc.clientConn
 	defer closeConn(conn, clientConn)
@@ -131,76 +130,34 @@ func send(lc *localClient) {
 	}
 }
 
-func loopFetch(lc *localClient) {
+func loopSendAndFetch(lc *localClient) {
 	conn := lc.conn
 	clientConn := lc.clientConn
 	defer closeConn(conn, clientConn)
 
-	interval := time.Millisecond * 300
+	interval := time.Millisecond * 100
 	ticker := time.NewTicker(interval)
 	var err error
 	defer ticker.Stop()
 
-	log.Infof("start loop fetch, interval:%s", interval)
+	log.Infof("start loop send and fetch, interval:%s", interval)
 	for range ticker.C {
 		if clientConn == nil || conn == nil {
 			log.Warnf("conn is:%v, clientConn is:%v", conn, clientConn)
 			return
 		}
 
-		var resp []byte
-		if resp, err = clientConn.FetchPackets(); err != nil {
-			log.Errorf("fetch packets fialed: %s", err)
-			return
-		}
-
-		var packets []*protocol.WrappedPacket
-		if packets, err = connection.ReadPackets(resp); err != nil {
-			log.Errorf("parse packets fialed: %s", err)
-			return
-		}
-
-		for _, p := range packets {
-			conn.SetWriteDeadline(time.Now().Add(connection.WriteDeadlineDuration))
-			if err = protocol.WritePacket(conn, p); err != nil {
-				log.Errorf("write packet fialed: %s", err)
+		var packetStr = ""
+		packetsOfClient := findSomePacketsOfClient(lc)
+		if len(packetsOfClient) > 0 {
+			if packetStr, err = connection.ConvertToBase64String(packetsOfClient); err != nil {
+				log.Errorf("convert base64 fialed: %s", err)
 				return
 			}
 		}
-	}
-}
-
-func loopSend(lc *localClient) {
-	conn := lc.conn
-	clientConn := lc.clientConn
-	defer closeConn(conn, clientConn)
-
-	interval := time.Millisecond * 300
-	ticker := time.NewTicker(interval)
-	var err error
-	defer ticker.Stop()
-
-	log.Infof("start loop send, interval:%s", interval)
-	for range ticker.C {
-		if clientConn == nil || conn == nil {
-			log.Warnf("conn is:%v, clientConn is:%v", conn, clientConn)
-			return
-		}
-
-		packetsOfClient := findSomePacketsOfClient(lc)
-		if len(packetsOfClient) == 0 {
-			continue
-		}
-
-		var packetStr string
-		if packetStr, err = connection.ConvertToBase64String(packetsOfClient); err != nil {
-			log.Errorf("convert base64 fialed: %s", err)
-			return
-		}
-		log.Infof("send packetStr:%s", packetStr)
 
 		var resp []byte
-		if resp, err = clientConn.SendData([]byte(packetStr)); err != nil {
+		if resp, err = clientConn.SendAndFetchPackets([]byte(packetStr)); err != nil {
 			log.Errorf("send data fialed: %s", err)
 			return
 		}
@@ -210,6 +167,9 @@ func loopSend(lc *localClient) {
 			log.Errorf("parse packets fialed: %s", err)
 			return
 		}
+		if len(packets) > 0 {
+			log.Infof("read packets size:%d", len(packets))
+		}
 
 		for _, p := range packets {
 			conn.SetWriteDeadline(time.Now().Add(connection.WriteDeadlineDuration))
@@ -217,6 +177,7 @@ func loopSend(lc *localClient) {
 				log.Errorf("write packet fialed: %s", err)
 				return
 			}
+			log.Infof("write packet from local client: %v", p)
 		}
 	}
 }
